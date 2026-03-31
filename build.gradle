@@ -1,0 +1,578 @@
+import groovy.json.JsonOutput
+import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.provider.Provider
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Optional
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.OutputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+import org.gradle.process.ExecOperations
+
+import javax.inject.Inject
+
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+plugins {
+    id 'base'
+}
+
+group = 'com.impact.packaging'
+version = (findProperty('appVersion') ?: '5.8.0').toString()
+
+def appVersion = providers.provider { project.version.toString() }
+def productName = providers.gradleProperty('productName').orElse('Impact')
+def buildDate = providers.provider {
+    LocalDate.now(ZoneId.systemDefault()).format(DateTimeFormatter.ISO_LOCAL_DATE)
+}
+def macosVariant = providers.gradleProperty('macosVariant').orElse('silicon')
+def sevenZipBinProperty = objects.property(String)
+def resolvedSevenZipBin = providers.provider {
+    if (!sevenZipBinProperty.present) {
+        throw new GradleException("7-Zip has not been resolved yet. Run a task depending on check7zip first.")
+    }
+    sevenZipBinProperty.get()
+}
+def distDir = layout.buildDirectory.dir('dist')
+def downloadsDir = layout.buildDirectory.dir('downloads')
+def tempDir = layout.buildDirectory.dir('tmp')
+def sfxModuleFile = providers.gradleProperty('sevenZipSfxModule')
+    .flatMap { overridePath ->
+        layout.file(providers.provider { project.file(overridePath) })
+    }
+    .orElse(layout.projectDirectory.file('tools/7z.sfx'))
+
+abstract class DownloadArtifact extends DefaultTask {
+    @Input
+    abstract Property<String> getSourceUrl()
+
+    @OutputFile
+    abstract RegularFileProperty getTargetFile()
+
+    @TaskAction
+    void download() {
+        def output = targetFile.get().asFile
+        output.parentFile.mkdirs()
+        logger.lifecycle("Downloading ${sourceUrl.get()} -> ${output}")
+        sourceUrl.get().toURL().withInputStream { input ->
+            Files.copy(input, output.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+}
+
+abstract class ExtractArchive extends DefaultTask {
+    @Inject
+    abstract ExecOperations getExecOperations()
+
+    @Inject
+    abstract FileSystemOperations getFileSystemOperations()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getArchiveFile()
+
+    @OutputDirectory
+    abstract DirectoryProperty getDestinationDir()
+
+    @OutputDirectory
+    abstract DirectoryProperty getScratchDir()
+
+    @Input
+    abstract Property<String> getArchiveKind()
+
+    @Input
+    @Optional
+    abstract Property<String> getSevenZipBinary()
+
+    @TaskAction
+    void extract() {
+        def archive = archiveFile.get().asFile
+        def destination = destinationDir.get().asFile
+        def scratch = scratchDir.get().asFile
+
+        project.delete(destination)
+        project.delete(scratch)
+        destination.mkdirs()
+        scratch.mkdirs()
+
+        switch (archiveKind.get()) {
+            case 'zip':
+                fileSystemOperations.copy {
+                    from project.zipTree(archive)
+                    into destination
+                }
+                break
+            case 'tgz':
+                fileSystemOperations.copy {
+                    from project.tarTree(project.resources.gzip(archive))
+                    into destination
+                }
+                break
+            case 'dmg':
+                if (!sevenZipBinary.present) {
+                    throw new GradleException("A resolved 7-Zip binary is required to extract DMG archives.")
+                }
+                run7ZipExtraction(archive, destination, scratch)
+                break
+            default:
+                throw new GradleException("Unsupported archive kind: ${archiveKind.get()}")
+        }
+    }
+
+    void run7ZipExtraction(File archive, File destination, File scratch) {
+        def sevenZip = sevenZipBinary.get()
+        execOperations.exec {
+            executable = sevenZip
+            args 'x', archive.absolutePath, "-o${scratch.absolutePath}", '-y'
+        }
+
+        def nestedArchives = project.fileTree(scratch).matching {
+            include '**/*.tar', '**/*.pkg', '**/*.app', '**/*.zip'
+        }.files
+
+        if (!nestedArchives.isEmpty()) {
+            nestedArchives.each { nested ->
+                if (nested.isDirectory()) {
+                    fileSystemOperations.copy {
+                        from nested
+                        into destination
+                    }
+                } else if (nested.name.endsWith('.app')) {
+                    fileSystemOperations.copy {
+                        from nested.parentFile
+                        include nested.name + '/**'
+                        into destination
+                    }
+                } else {
+                    execOperations.exec {
+                        executable = sevenZip
+                        args 'x', nested.absolutePath, "-o${destination.absolutePath}", '-y'
+                    }
+                }
+            }
+        } else {
+            fileSystemOperations.copy {
+                from scratch
+                exclude 'Applications', '**/Applications'
+                into destination
+            }
+        }
+    }
+}
+
+abstract class PatchIniTask extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getIniFile()
+
+    @Input
+    abstract ListProperty<String> getLinesToInject()
+
+    @TaskAction
+    void patchIni() {
+        IniPatcher.patchIniFile(iniFile.get().asFile, linesToInject.get())
+    }
+}
+
+abstract class WriteTextFile extends DefaultTask {
+    @Input
+    abstract Property<String> getContent()
+
+    @OutputFile
+    abstract RegularFileProperty getTargetFile()
+
+    @TaskAction
+    void writeFile() {
+        def output = targetFile.get().asFile
+        output.parentFile.mkdirs()
+        output.setText(content.get(), 'UTF-8')
+    }
+}
+
+abstract class BuildSfxExe extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getSfxModule()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getSfxConfig()
+
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getArchive7z()
+
+    @OutputFile
+    abstract RegularFileProperty getOutputFile()
+
+    @TaskAction
+    void buildExe() {
+        def moduleFile = sfxModule.get().asFile
+        if (!moduleFile.exists()) {
+            throw new GradleException("7-Zip SFX module not found: ${moduleFile}. Provide -PsevenZipSfxModule=/path/to/7z.sfx")
+        }
+
+        def output = outputFile.get().asFile
+        output.parentFile.mkdirs()
+        output.withOutputStream { out ->
+            [moduleFile, sfxConfig.get().asFile, archive7z.get().asFile].each { part ->
+                part.withInputStream { input ->
+                    input.transferTo(out)
+                }
+            }
+        }
+    }
+}
+
+final class IniPatcher {
+    static void patchIniFile(File iniFile, List<String> linesToInject) {
+        if (!iniFile.exists()) {
+            throw new GradleException("Cannot patch missing ini file: ${iniFile}")
+        }
+
+        def existingLines = iniFile.readLines('UTF-8')
+        def normalizedAdditions = linesToInject.collect { it.trim() }.findAll { !it.isEmpty() }
+        def missingLines = normalizedAdditions.findAll { candidate -> !existingLines.contains(candidate) }
+
+        if (missingLines.isEmpty()) {
+            return
+        }
+
+        def vmArgsIndex = existingLines.indexOf('-vmargs')
+        def updatedLines = []
+
+        if (vmArgsIndex >= 0) {
+            updatedLines.addAll(existingLines[0..vmArgsIndex])
+            updatedLines.addAll(missingLines)
+            if (vmArgsIndex + 1 < existingLines.size()) {
+                updatedLines.addAll(existingLines[(vmArgsIndex + 1)..<existingLines.size()])
+            }
+        } else {
+            updatedLines.addAll(existingLines)
+            if (!updatedLines.isEmpty() && updatedLines.last().trim()) {
+                updatedLines.add('')
+            }
+            updatedLines.addAll(missingLines)
+        }
+
+        iniFile.setText(updatedLines.join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
+    }
+}
+
+def capitalizeOs = { String osName -> osName.capitalize() }
+def osTaskName = { String prefix, String osName -> "${prefix}${capitalizeOs(osName)}" }
+def archiveFileName = { String fileName -> layout.buildDirectory.file("downloads/${fileName}") }
+def impactDirFor = { String osName -> layout.buildDirectory.dir("impact-${osName}") }
+def scratchDirFor = { String osName -> layout.buildDirectory.dir("tmp/extract-${osName}") }
+def currentOsName = System.getProperty('os.name', 'unknown')
+
+def archiReleaseBaseUrl = providers.gradleProperty('archiReleaseBaseUrl')
+    .orElse('https://github.com/archimatetool/archi.io/releases/download')
+
+def windowsArchiveNameProvider = appVersion.map { versionValue -> "Archi-Win64-${versionValue}.zip" }
+def linuxArchiveNameProvider = appVersion.map { versionValue -> "Archi-Linux64-${versionValue}.tgz" }
+def macosArchiveNameProvider = providers.provider {
+    def versionValue = appVersion.get()
+    def variant = macosVariant.get().toLowerCase(Locale.ROOT)
+    switch (variant) {
+        case 'silicon':
+            return "Archi-Mac-Silicon-${versionValue}.dmg"
+        case 'intel':
+            return "Archi-Mac-Intel-${versionValue}.dmg"
+        default:
+            throw new GradleException("Unsupported macosVariant '${variant}'. Use 'silicon' or 'intel'.")
+    }
+}
+
+def buildReleaseUrl = { Provider<String> archiveNameProvider ->
+    providers.provider { "${archiReleaseBaseUrl.get()}/${appVersion.get()}/${archiveNameProvider.get()}" }
+}
+
+def textTemplatePatterns = ['README*', '**/README*', '**/*.readme', '**/*.README']
+def iniLinesFromProperty = { String propertyName, List<String> defaults ->
+    providers.gradleProperty(propertyName)
+        .map { raw -> raw.split(/\r?\n/).collect { it.trim() }.findAll { !it.isEmpty() } }
+        .orElse(defaults)
+}
+
+def osConfigs = [
+    linux  : [
+        archiveKind   : 'tgz',
+        impactDir     : impactDirFor('linux'),
+        archiveName   : linuxArchiveNameProvider,
+        archiveUrl    : buildReleaseUrl(linuxArchiveNameProvider),
+        commonMappings: [
+            [source: layout.projectDirectory.dir('addons/common'), target: '.']
+        ],
+        osMappings    : [
+            [source: layout.projectDirectory.dir('addons/linux'), target: '.']
+        ],
+        archiIniPath  : 'Archi/Archi.ini',
+        iniLines      : iniLinesFromProperty('linuxIniLines', ['-Dimpact.platform=linux']),
+        launcher      : 'Archi'
+    ],
+    macos  : [
+        archiveKind   : 'dmg',
+        impactDir     : impactDirFor('macos'),
+        archiveName   : macosArchiveNameProvider,
+        archiveUrl    : buildReleaseUrl(macosArchiveNameProvider),
+        commonMappings: [
+            [source: layout.projectDirectory.dir('addons/common'), target: '.']
+        ],
+        osMappings    : [
+            [source: layout.projectDirectory.dir('addons/macos'), target: 'Archi.app/Contents/Resources']
+        ],
+        archiIniPath  : 'Archi.app/Contents/Eclipse/Archi.ini',
+        iniLines      : iniLinesFromProperty('macosIniLines', ['-Dimpact.platform=macos']),
+        launcher      : 'Archi.app'
+    ],
+    windows: [
+        archiveKind   : 'zip',
+        impactDir     : impactDirFor('windows'),
+        archiveName   : windowsArchiveNameProvider,
+        archiveUrl    : buildReleaseUrl(windowsArchiveNameProvider),
+        commonMappings: [
+            [source: layout.projectDirectory.dir('addons/common'), target: '.']
+        ],
+        osMappings    : [
+            [source: layout.projectDirectory.dir('addons/windows'), target: '.']
+        ],
+        archiIniPath  : 'Archi/Archi.ini',
+        iniLines      : iniLinesFromProperty('windowsIniLines', ['-Dimpact.platform=windows']),
+        launcher      : providers.gradleProperty('windowsLauncher').orElse('Archi.exe')
+    ]
+]
+
+tasks.register('check7zip') {
+    group = 'packaging'
+    description = 'Resolves the 7-Zip binary from -PsevenZipBin, 7zz, or 7z.'
+    outputs.upToDateWhen { false }
+    doLast {
+        def explicitBinary = project.findProperty('sevenZipBin')?.toString()
+        def candidates = explicitBinary ? [explicitBinary] : ['7zz', '7z']
+        def resolved = candidates.find { candidate ->
+            try {
+                def process = new ProcessBuilder(candidate, '--help')
+                    .redirectErrorStream(true)
+                    .start()
+                process.inputStream.transferTo(OutputStream.nullOutputStream())
+                return process.waitFor() == 0
+            } catch (IOException ignored) {
+                return false
+            }
+        }
+
+        if (!resolved) {
+            def osName = currentOsName.toLowerCase(Locale.ROOT)
+            def installHint
+
+            if (osName.contains('mac')) {
+                installHint = "macOS: install 7-Zip with Homebrew (`brew install sevenzip`) or pass -PsevenZipBin=/path/to/7zz."
+            } else if (osName.contains('linux')) {
+                installHint = "Linux: install 7-Zip with your distribution package manager, then rerun with -PsevenZipBin=/path/to/7zz if needed. Examples: `apt install 7zip`, `dnf install 7zip`, `pacman -S 7zip`."
+            } else {
+                installHint = "Install 7-Zip and rerun with -PsevenZipBin=/path/to/7zz if it is not on PATH."
+            }
+
+            throw new GradleException("""No 7-Zip binary found.
+Looked for: ${explicitBinary ? explicitBinary : '7zz, 7z'}
+
+${installHint}""")
+        }
+
+        sevenZipBinProperty.set(resolved)
+        logger.lifecycle("Resolved 7-Zip binary: ${resolved}")
+    }
+}
+
+def patchTaskProviders = [:]
+
+osConfigs.each { osName, config ->
+    def artifactOverrideProperty = "${osName}ArchiveFile"
+    def artifactFileProvider = providers.gradleProperty(artifactOverrideProperty)
+        .flatMap { overridePath ->
+            layout.file(providers.provider { project.file(overridePath) })
+        }
+        .orElse(config.archiveName.flatMap { archiveFileName(it) })
+
+    def downloadTaskName = osTaskName('downloadArchi', osName)
+    def downloadTask = tasks.register(downloadTaskName, DownloadArtifact) {
+        group = 'packaging'
+        description = "Downloads the Archi base archive for ${osName}."
+        sourceUrl.set(config.archiveUrl)
+        targetFile.set(artifactFileProvider)
+        onlyIf {
+            !providers.gradleProperty(artifactOverrideProperty).present
+        }
+    }
+
+    def extractTaskName = osTaskName('extractArchi', osName)
+    def extractTaskProvider
+    def existingExtractTask = tasks.findByName(extractTaskName)
+    if (existingExtractTask) {
+        extractTaskProvider = tasks.named(extractTaskName)
+    } else {
+        extractTaskProvider = tasks.register(extractTaskName, ExtractArchive) {
+            group = 'packaging'
+            description = "Extracts the Archi archive for ${osName} into its working directory."
+            archiveFile.set(artifactFileProvider)
+            destinationDir.set(config.impactDir)
+            scratchDir.set(scratchDirFor(osName))
+            archiveKind.set(config.archiveKind)
+            dependsOn(downloadTask)
+            if (config.archiveKind == 'dmg') {
+                sevenZipBinary.set(resolvedSevenZipBin)
+                dependsOn(tasks.named('check7zip'))
+            }
+        }
+    }
+
+    tasks.register(osTaskName('prepareImpact', osName)) {
+        group = 'packaging'
+        description = "Prepares the impact work directory for ${osName}."
+        dependsOn(extractTaskProvider)
+        outputs.dir(config.impactDir)
+    }
+
+    def assembleTask = tasks.register(osTaskName('assembleImpact', osName), Copy) {
+        group = 'packaging'
+        description = "Copies common and ${osName}-specific overlays into the impact work directory."
+        dependsOn(osTaskName('prepareImpact', osName))
+        into(config.impactDir)
+        includeEmptyDirs = false
+        inputs.property('mappingConfig', JsonOutput.toJson(
+            (config.commonMappings + config.osMappings).collect { mapping -> [target: mapping.target] }
+        ))
+        inputs.property('templateValues', providers.provider {
+            [
+                version  : appVersion.get(),
+                appVersion: appVersion.get(),
+                platform : osName,
+                buildDate: buildDate.get(),
+                productName: productName.get()
+            ]
+        })
+
+        (config.commonMappings + config.osMappings).each { mapping ->
+            from(mapping.source) {
+                into(mapping.target)
+                filesMatching(textTemplatePatterns) {
+                    expand(
+                        version    : appVersion.get(),
+                        appVersion : appVersion.get(),
+                        platform   : osName,
+                        buildDate  : buildDate.get(),
+                        productName: productName.get()
+                    )
+                    filteringCharset = 'UTF-8'
+                }
+            }
+        }
+    }
+
+    def patchTask = tasks.register(osTaskName('patchArchiIni', osName), PatchIniTask) {
+        group = 'packaging'
+        description = "Applies the ${osName} Archi.ini patch in an idempotent way."
+        dependsOn(assembleTask)
+        iniFile.set(config.impactDir.map { it.file(config.archiIniPath) })
+        linesToInject.set(config.iniLines)
+    }
+
+    patchTaskProviders[osName] = patchTask
+}
+
+def windows7zFile = distDir.map { it.file('impact-windows.7z') }
+def windowsSfxConfigFile = distDir.map { it.file('impact-windows.sfx.txt') }
+def windowsExeFile = distDir.map { it.file('impact-windows.exe') }
+
+tasks.register('createWindows7z', Exec) {
+    group = 'packaging'
+    description = 'Creates the Windows .7z archive from build/impact-windows.'
+    dependsOn(tasks.named('check7zip'))
+    dependsOn(tasks.named('assembleImpactWindows'))
+    dependsOn(tasks.named('patchArchiIniWindows'))
+    inputs.dir(osConfigs.windows.impactDir)
+    outputs.file(windows7zFile)
+    doFirst {
+        def output = windows7zFile.get().asFile
+        output.parentFile.mkdirs()
+        project.delete(output)
+        executable = resolvedSevenZipBin.get()
+        args 'a', '-t7z', output.absolutePath, "${osConfigs.windows.impactDir.get().asFile.absolutePath}${File.separator}*"
+        workingDir = osConfigs.windows.impactDir.get().asFile
+    }
+}
+
+tasks.register('writeWindowsSfxConfig', WriteTextFile) {
+    group = 'packaging'
+    description = 'Writes the 7-Zip SFX configuration file for the Windows package.'
+    def sfxContent = providers.provider {
+        """;!@Install@!UTF-8!
+Title="${productName.get()} Windows"
+BeginPrompt="Extraire ${productName.get()} ?"
+RunProgram="${osConfigs.windows.launcher.get()}"
+;!@InstallEnd@!
+"""
+    }
+    content.set(sfxContent)
+    targetFile.set(windowsSfxConfigFile)
+}
+
+tasks.register('buildWindowsSfxExe', BuildSfxExe) {
+    group = 'packaging'
+    description = 'Builds the final self-extracting Windows executable without Windows-specific shell commands.'
+    dependsOn(tasks.named('createWindows7z'))
+    dependsOn(tasks.named('writeWindowsSfxConfig'))
+    sfxModule.set(sfxModuleFile)
+    sfxConfig.set(windowsSfxConfigFile)
+    archive7z.set(windows7zFile)
+    outputFile.set(windowsExeFile)
+}
+
+tasks.register('packageLinux') {
+    group = 'packaging'
+    description = 'Builds the Linux packaging work directory and patches Archi.ini.'
+    dependsOn(patchTaskProviders.linux)
+}
+
+tasks.register('packageMacos') {
+    group = 'packaging'
+    description = 'Builds the macOS packaging work directory and patches Archi.ini.'
+    dependsOn(patchTaskProviders.macos)
+}
+
+tasks.register('packageWindows') {
+    group = 'packaging'
+    description = 'Builds the final Windows SFX executable.'
+    dependsOn(tasks.named('buildWindowsSfxExe'))
+}
+
+tasks.register('packageAll') {
+    group = 'packaging'
+    description = 'Runs the packaging pipeline for Linux, macOS, and Windows.'
+    dependsOn(tasks.named('packageLinux'))
+    dependsOn(tasks.named('packageMacos'))
+    dependsOn(tasks.named('packageWindows'))
+}
+
+tasks.named('clean') {
+    delete(layout.buildDirectory.dir('impact-linux'))
+    delete(layout.buildDirectory.dir('impact-macos'))
+    delete(layout.buildDirectory.dir('impact-windows'))
+    delete(distDir)
+    delete(downloadsDir)
+    delete(tempDir)
+}

@@ -4,6 +4,7 @@ import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.FileSystemOperations
 import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
@@ -144,11 +145,22 @@ abstract class PatchIniTask extends DefaultTask {
     abstract RegularFileProperty getIniFile()
 
     @Input
-    abstract ListProperty<String> getLinesToInject()
+    abstract ListProperty<String> getOpenFileLines()
+
+    @Input
+    abstract MapProperty<String, String> getOptionValueAssignments()
+
+    @Input
+    abstract ListProperty<String> getVmArgsLines()
 
     @TaskAction
     void patchIni() {
-        IniPatcher.patchIniFile(iniFile.get().asFile, linesToInject.get())
+        IniPatcher.patchIniFile(
+            iniFile.get().asFile,
+            openFileLines.get(),
+            optionValueAssignments.get(),
+            vmArgsLines.get()
+        )
     }
 }
 
@@ -203,36 +215,125 @@ abstract class BuildSfxExe extends DefaultTask {
 }
 
 final class IniPatcher {
-    static void patchIniFile(File iniFile, List<String> linesToInject) {
+    static void patchIniFile(
+        File iniFile,
+        List<String> openFileLines,
+        Map<String, String> optionValueAssignments,
+        List<String> vmArgsLines
+    ) {
         if (!iniFile.exists()) {
             throw new GradleException("Cannot patch missing ini file: ${iniFile}")
         }
 
-        def existingLines = iniFile.readLines('UTF-8')
-        def normalizedAdditions = linesToInject.collect { it.trim() }.findAll { !it.isEmpty() }
-        def missingLines = normalizedAdditions.findAll { candidate -> !existingLines.contains(candidate) }
+        def updatedLines = iniFile.readLines('UTF-8')
 
-        if (missingLines.isEmpty()) {
+        applyOptionValueAssignments(updatedLines, optionValueAssignments)
+        insertLinesAfterOption(updatedLines, '-openFile', openFileLines)
+        insertVmArgsLines(updatedLines, vmArgsLines)
+
+        iniFile.setText(updatedLines.join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
+    }
+
+    private static void applyOptionValueAssignments(List<String> lines, Map<String, String> assignments) {
+        assignments.each { option, rawValue ->
+            def optionName = option?.trim()
+            def optionValue = rawValue?.trim()
+
+            if (!optionName || optionValue == null || optionValue.isEmpty()) {
+                return
+            }
+
+            def optionIndex = lines.indexOf(optionName)
+            if (optionIndex >= 0) {
+                if (optionIndex + 1 < lines.size() && !isOptionLine(lines[optionIndex + 1])) {
+                    lines[optionIndex + 1] = optionValue
+                } else {
+                    lines.add(optionIndex + 1, optionValue)
+                }
+            } else {
+                def insertionIndex = insertionIndexBeforeVmArgs(lines)
+                lines.add(insertionIndex, optionName)
+                lines.add(insertionIndex + 1, optionValue)
+            }
+        }
+    }
+
+    private static void insertLinesAfterOption(List<String> lines, String option, List<String> additions) {
+        def normalizedAdditions = additions.collect { it.trim() }.findAll { !it.isEmpty() }
+        if (normalizedAdditions.isEmpty()) {
             return
         }
 
-        def vmArgsIndex = existingLines.indexOf('-vmargs')
-        def updatedLines = []
+        def insertionIndex = findInsertionIndexAfterOption(lines, option)
+        normalizedAdditions.each { candidate ->
+            if (!lines.contains(candidate)) {
+                lines.add(insertionIndex, candidate)
+                insertionIndex++
+            }
+        }
+    }
 
-        if (vmArgsIndex >= 0) {
-            updatedLines.addAll(existingLines[0..vmArgsIndex])
-            updatedLines.addAll(missingLines)
-            if (vmArgsIndex + 1 < existingLines.size()) {
-                updatedLines.addAll(existingLines[(vmArgsIndex + 1)..<existingLines.size()])
-            }
-        } else {
-            updatedLines.addAll(existingLines)
-            if (!updatedLines.isEmpty() && updatedLines.last().trim()) {
-                updatedLines.add('')
-            }
-            updatedLines.addAll(missingLines)
+    private static void insertVmArgsLines(List<String> lines, List<String> vmArgsLines) {
+        def normalizedAdditions = vmArgsLines.collect { it.trim() }.findAll { !it.isEmpty() }
+        if (normalizedAdditions.isEmpty()) {
+            return
         }
 
-        iniFile.setText(updatedLines.join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
+        def vmArgsIndex = lines.indexOf('-vmargs')
+        def insertionIndex = vmArgsIndex >= 0 ? vmArgsIndex + 1 : insertionIndexBeforeVmArgs(lines)
+
+        if (vmArgsIndex < 0 && !lines.isEmpty() && lines.last().trim()) {
+            lines.add('')
+            insertionIndex = lines.size()
+        }
+
+        normalizedAdditions.each { candidate ->
+            if (!lines.contains(candidate)) {
+                lines.add(insertionIndex, candidate)
+                insertionIndex++
+            }
+        }
+    }
+
+    private static int findInsertionIndexAfterOption(List<String> lines, String option) {
+        def optionIndex = lines.indexOf(option)
+        if (optionIndex < 0) {
+            return insertionIndexBeforeVmArgs(lines)
+        }
+
+        def insertionIndex = optionIndex + 1
+        if (insertionIndex < lines.size() && !isOptionLine(lines[insertionIndex])) {
+            insertionIndex++
+        }
+
+        return insertionIndex
+    }
+
+    private static int insertionIndexBeforeVmArgs(List<String> lines) {
+        def vmArgsIndex = lines.indexOf('-vmargs')
+        return vmArgsIndex >= 0 ? vmArgsIndex : lines.size()
+    }
+
+    private static boolean isOptionLine(String line) {
+        return line?.trim()?.startsWith('-')
+    }
+}
+
+final class IniPropertyParsers {
+    static Map<String, String> parseAssignments(String raw, String propertyName) {
+        raw.split(/\r?\n/)
+            .collect { it.trim() }
+            .findAll { !it.isEmpty() }
+            .collectEntries { entry ->
+                def separatorIndex = entry.indexOf('=')
+                if (separatorIndex <= 0) {
+                    throw new GradleException("Invalid ${propertyName} entry '${entry}'. Expected key=value.")
+                }
+
+                [
+                    (entry.substring(0, separatorIndex).trim()):
+                        entry.substring(separatorIndex + 1).trim()
+                ]
+            }
     }
 }

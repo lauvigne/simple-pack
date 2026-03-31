@@ -71,6 +71,11 @@ def iniLinesFromProperty = { String propertyName, List<String> defaults ->
         .map { raw -> raw.split(/\r?\n/).collect { it.trim() }.findAll { !it.isEmpty() } }
         .orElse(defaults)
 }
+def iniAssignmentsFromProperty = { String propertyName, Map<String, String> defaults ->
+    providers.gradleProperty(propertyName)
+        .map { raw -> IniPropertyParsers.parseAssignments(raw, propertyName) }
+        .orElse(defaults)
+}
 
 def osConfigs = [
     linux  : [
@@ -85,7 +90,9 @@ def osConfigs = [
             [source: layout.projectDirectory.dir('addons/linux'), target: '.']
         ],
         archiIniPath  : 'Archi/Archi.ini',
-        iniLines      : iniLinesFromProperty('linuxIniLines', ['-Dimpact.platform=linux']),
+        openFileLines : iniLinesFromProperty('linuxOpenFileLines', []),
+        iniAssignments: iniAssignmentsFromProperty('linuxIniAssignments', [:]),
+        vmArgsLines   : iniLinesFromProperty('linuxVmArgsLines', ['-Dimpact.platform=linux']),
         launcher      : 'Archi'
     ],
     macos  : [
@@ -100,7 +107,9 @@ def osConfigs = [
             [source: layout.projectDirectory.dir('addons/macos'), target: 'Archi.app/Contents/Resources']
         ],
         archiIniPath  : 'Archi.app/Contents/Eclipse/Archi.ini',
-        iniLines      : iniLinesFromProperty('macosIniLines', ['-Dimpact.platform=macos']),
+        openFileLines : iniLinesFromProperty('macosOpenFileLines', []),
+        iniAssignments: iniAssignmentsFromProperty('macosIniAssignments', ['--DataLocation': '@user.home/Archi']),
+        vmArgsLines   : iniLinesFromProperty('macosVmArgsLines', ['-Dimpact.platform=macos']),
         launcher      : 'Archi.app'
     ],
     windows: [
@@ -115,7 +124,9 @@ def osConfigs = [
             [source: layout.projectDirectory.dir('addons/windows'), target: '.']
         ],
         archiIniPath  : 'Archi/Archi.ini',
-        iniLines      : iniLinesFromProperty('windowsIniLines', ['-Dimpact.platform=windows']),
+        openFileLines : iniLinesFromProperty('windowsOpenFileLines', []),
+        iniAssignments: iniAssignmentsFromProperty('windowsIniAssignments', [:]),
+        vmArgsLines   : iniLinesFromProperty('windowsVmArgsLines', ['-Dimpact.platform=windows']),
         launcher      : providers.gradleProperty('windowsLauncher').orElse('Archi.exe')
     ]
 ]
@@ -252,7 +263,9 @@ osConfigs.each { osName, config ->
         description = "Applies the ${osName} Archi.ini patch in an idempotent way."
         dependsOn(assembleTask)
         iniFile.set(config.impactDir.map { it.file(config.archiIniPath) })
-        linesToInject.set(config.iniLines)
+        openFileLines.set(config.openFileLines)
+        optionValueAssignments.set(config.iniAssignments)
+        vmArgsLines.set(config.vmArgsLines)
     }
 
     patchTaskProviders[osName] = patchTask

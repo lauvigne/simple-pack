@@ -228,7 +228,7 @@ final class IniPatcher {
         def updatedLines = iniFile.readLines('UTF-8')
 
         applyOptionValueAssignments(updatedLines, optionValueAssignments)
-        insertLinesAfterOption(updatedLines, '-openFile', openFileLines)
+        insertLinesAfterLauncherDefaultAction(updatedLines, 'openFile', openFileLines)
         insertVmArgsLines(updatedLines, vmArgsLines)
 
         iniFile.setText(updatedLines.join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
@@ -258,13 +258,13 @@ final class IniPatcher {
         }
     }
 
-    private static void insertLinesAfterOption(List<String> lines, String option, List<String> additions) {
+    private static void insertLinesAfterLauncherDefaultAction(List<String> lines, String actionValue, List<String> additions) {
         def normalizedAdditions = additions.collect { it.trim() }.findAll { !it.isEmpty() }
         if (normalizedAdditions.isEmpty()) {
             return
         }
 
-        def insertionIndex = findInsertionIndexAfterOption(lines, option)
+        def insertionIndex = findInsertionIndexAfterLauncherDefaultAction(lines, actionValue)
         normalizedAdditions.each { candidate ->
             if (!lines.contains(candidate)) {
                 lines.add(insertionIndex, candidate)
@@ -295,14 +295,20 @@ final class IniPatcher {
         }
     }
 
-    private static int findInsertionIndexAfterOption(List<String> lines, String option) {
-        def optionIndex = lines.indexOf(option)
+    private static int findInsertionIndexAfterLauncherDefaultAction(List<String> lines, String actionValue) {
+        def optionIndex = lines.indexOf('--launcher.defaultAction')
+        if (optionIndex < 0) {
+            optionIndex = lines.indexOf('-openFile')
+        }
+
         if (optionIndex < 0) {
             return insertionIndexBeforeVmArgs(lines)
         }
 
         def insertionIndex = optionIndex + 1
-        if (insertionIndex < lines.size() && !isOptionLine(lines[insertionIndex])) {
+        if (insertionIndex < lines.size() && lines[insertionIndex].trim() == actionValue) {
+            insertionIndex++
+        } else if (insertionIndex < lines.size() && !isOptionLine(lines[insertionIndex])) {
             insertionIndex++
         }
 

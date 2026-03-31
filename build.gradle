@@ -92,6 +92,7 @@ def osConfigs = [
         archiIniPath  : 'Archi/Archi.ini',
         openFileLines : iniLinesFromProperty('linuxOpenFileLines', []),
         iniAssignments: iniAssignmentsFromProperty('linuxIniAssignments', [:]),
+        vmArgAssignments: iniAssignmentsFromProperty('linuxVmArgAssignments', [:]),
         vmArgsLines   : iniLinesFromProperty('linuxVmArgsLines', ['-Dimpact.platform=linux']),
         launcher      : 'Archi'
     ],
@@ -109,6 +110,7 @@ def osConfigs = [
         archiIniPath  : 'Archi.app/Contents/Eclipse/Archi.ini',
         openFileLines : iniLinesFromProperty('macosOpenFileLines', []),
         iniAssignments: iniAssignmentsFromProperty('macosIniAssignments', ['--DataLocation': '@user.home/Archi']),
+        vmArgAssignments: iniAssignmentsFromProperty('macosVmArgAssignments', ['-Ddata.location': '@user.home/Archi']),
         vmArgsLines   : iniLinesFromProperty('macosVmArgsLines', ['-Dimpact.platform=macos']),
         launcher      : 'Archi.app'
     ],
@@ -126,6 +128,7 @@ def osConfigs = [
         archiIniPath  : 'Archi/Archi.ini',
         openFileLines : iniLinesFromProperty('windowsOpenFileLines', []),
         iniAssignments: iniAssignmentsFromProperty('windowsIniAssignments', [:]),
+        vmArgAssignments: iniAssignmentsFromProperty('windowsVmArgAssignments', [:]),
         vmArgsLines   : iniLinesFromProperty('windowsVmArgsLines', ['-Dimpact.platform=windows']),
         launcher      : providers.gradleProperty('windowsLauncher').orElse('Archi.exe')
     ]
@@ -265,6 +268,7 @@ osConfigs.each { osName, config ->
         iniFile.set(config.impactDir.map { it.file(config.archiIniPath) })
         openFileLines.set(config.openFileLines)
         optionValueAssignments.set(config.iniAssignments)
+        vmArgAssignments.set(config.vmArgAssignments)
         vmArgsLines.set(config.vmArgsLines)
     }
 

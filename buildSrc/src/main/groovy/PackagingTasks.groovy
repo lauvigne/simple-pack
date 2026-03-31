@@ -151,6 +151,9 @@ abstract class PatchIniTask extends DefaultTask {
     abstract MapProperty<String, String> getOptionValueAssignments()
 
     @Input
+    abstract MapProperty<String, String> getVmArgAssignments()
+
+    @Input
     abstract ListProperty<String> getVmArgsLines()
 
     @TaskAction
@@ -159,6 +162,7 @@ abstract class PatchIniTask extends DefaultTask {
             iniFile.get().asFile,
             openFileLines.get(),
             optionValueAssignments.get(),
+            vmArgAssignments.get(),
             vmArgsLines.get()
         )
     }
@@ -219,6 +223,7 @@ final class IniPatcher {
         File iniFile,
         List<String> openFileLines,
         Map<String, String> optionValueAssignments,
+        Map<String, String> vmArgAssignments,
         List<String> vmArgsLines
     ) {
         if (!iniFile.exists()) {
@@ -229,6 +234,7 @@ final class IniPatcher {
 
         applyOptionValueAssignments(updatedLines, optionValueAssignments)
         insertLinesAfterLauncherDefaultAction(updatedLines, 'openFile', openFileLines)
+        applyVmArgAssignments(updatedLines, vmArgAssignments)
         insertVmArgsLines(updatedLines, vmArgsLines)
 
         iniFile.setText(updatedLines.join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
@@ -291,6 +297,35 @@ final class IniPatcher {
             if (!lines.contains(candidate)) {
                 lines.add(insertionIndex, candidate)
                 insertionIndex++
+            }
+        }
+    }
+
+    private static void applyVmArgAssignments(List<String> lines, Map<String, String> assignments) {
+        if (assignments.isEmpty()) {
+            return
+        }
+
+        def vmArgsIndex = lines.indexOf('-vmargs')
+        def insertionIndex = vmArgsIndex >= 0 ? vmArgsIndex + 1 : insertionIndexBeforeVmArgs(lines)
+
+        assignments.each { rawKey, rawValue ->
+            def key = rawKey?.trim()
+            def value = rawValue?.trim()
+
+            if (!key || value == null || value.isEmpty()) {
+                return
+            }
+
+            def replacementLine = "${key}=${value}"
+            def existingIndex = lines.findIndexOf(insertionIndex) { line ->
+                line?.trim()?.startsWith("${key}=")
+            }
+
+            if (existingIndex >= 0) {
+                lines[existingIndex] = replacementLine
+            } else {
+                lines.add(insertionIndex, replacementLine)
             }
         }
     }

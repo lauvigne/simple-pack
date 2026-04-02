@@ -17,6 +17,9 @@ def productName = providers.gradleProperty('productName').orElse('Impact')
 def buildDate = providers.provider {
     LocalDate.now(ZoneId.systemDefault()).format(DateTimeFormatter.ISO_LOCAL_DATE)
 }
+def buildDateStamp = providers.provider {
+    LocalDate.now(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern('yyyyMMdd'))
+}
 def macosVariant = providers.gradleProperty('macosVariant').orElse('silicon')
 def sevenZipBinProperty = objects.property(String)
 def resolvedSevenZipBin = providers.provider {
@@ -277,9 +280,9 @@ osConfigs.each { osName, config ->
 
 def windows7zFile = distDir.map { it.file('impact-windows.7z') }
 def windowsSfxConfigFile = distDir.map { it.file('impact-windows.sfx.txt') }
-def windowsExeFile = distDir.map { it.file('impact-windows.exe') }
+def windowsExeFile = distDir.map { it.file("impact-windows-${buildDateStamp.get()}.exe") }
 def macosAppDir = osConfigs.macos.impactDir.map { it.dir('Archi.app') }
-def macosTarGzFile = distDir.map { it.file('impact-macos.tar.gz') }
+def macosTarGzFile = distDir.map { it.file("impact-macos-${project.version}-${buildDateStamp.get()}.tar.gz") }
 
 tasks.register('createWindows7z', Exec) {
     group = 'packaging'
@@ -348,6 +351,8 @@ tasks.register('createMacosTarGz', Tar) {
     dependsOn(tasks.named('signMacosApp'))
     compression = Compression.GZIP
     archiveBaseName.set('impact-macos')
+    archiveVersion.set(project.version.toString())
+    archiveClassifier.set(buildDateStamp)
     archiveExtension.set('tar.gz')
     destinationDirectory.set(distDir)
     from(osConfigs.macos.impactDir) {

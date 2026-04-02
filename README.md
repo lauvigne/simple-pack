@@ -75,4 +75,8 @@ Les artefacts finaux Windows sont produits sous `build/dist/` :
 
 - `impact-windows.7z`
 - `impact-windows.sfx.txt`
-- `impact-windows.exe`
+- `impact-windows-YYYYMMDD.exe`
+
+L’artefact final macOS est produit sous `build/dist/` :
+
+- `impact-macos-<version>-YYYYMMDD.tar.gz`

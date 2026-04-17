@@ -81,3 +81,54 @@ Les artefacts finaux Windows sont produits sous `build/dist/` :
 L’artefact final macOS est produit sous `build/dist/` :
 
 - `impact-macos-<version>-YYYYMMDD.tar.gz`
+
+## Docker Linux Headless
+
+Un [Dockerfile] est fourni pour exécuter la distribution Linux d’Archi en environnement headless avec `xvfb`.
+
+Il se base sur `debian:bookworm-slim` et cible en priorité le mode CLI d’Archi pour lancer des scripts jArchi sur un modèle.
+
+Préparation :
+
+```bash
+gradle packageLinux -PsevenZipBin=/chemin/vers/7zz
+docker build -t archi-headless .
+```
+
+Le `Dockerfile` attend une distribution Linux déjà préparée dans `build/impact-linux/Archi/`.
+
+Exécution :
+
+```bash
+docker run --rm archi-headless
+```
+
+Le comportement par défaut affiche l’aide du CLI Archi.
+
+Pour charger un modèle et exécuter un script jArchi :
+
+```bash
+docker run --rm archi-headless \
+  bash -lc 'xvfb-run -a /opt/archi/Archi \
+    -application com.archimatetool.commandline.app \
+    -consoleLog \
+    -nosplash \
+    --loadModel /work/model.archimate \
+    --script.runScript /work/script.ajs \
+    --saveModel /work/model.archimate'
+```
+
+Il faut alors monter les fichiers dans le conteneur, par exemple :
+
+```bash
+docker run --rm \
+  -v "$PWD/tests:/work" \
+  archi-headless \
+  bash -lc 'xvfb-run -a /opt/archi/Archi \
+    -application com.archimatetool.commandline.app \
+    -consoleLog \
+    -nosplash \
+    --loadModel /work/model.archimate \
+    --script.runScript /work/script.ajs \
+    --saveModel /work/model.archimate'
+```

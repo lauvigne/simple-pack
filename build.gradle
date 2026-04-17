@@ -281,6 +281,7 @@ osConfigs.each { osName, config ->
 def windows7zFile = distDir.map { it.file('impact-windows.7z') }
 def windowsSfxConfigFile = distDir.map { it.file('impact-windows.sfx.txt') }
 def windowsExeFile = distDir.map { it.file("impact-windows-${buildDateStamp.get()}.exe") }
+def windowsExeZipFile = distDir.map { it.file("impact-windows-${buildDateStamp.get()}.zip") }
 def macosAppDir = osConfigs.macos.impactDir.map { it.dir('Archi.app') }
 def macosTarGzFile = distDir.map { it.file("impact-macos-${project.version}-${buildDateStamp.get()}.tar.gz") }
 
@@ -326,6 +327,17 @@ tasks.register('buildWindowsSfxExe', BuildSfxExe) {
     sfxConfig.set(windowsSfxConfigFile)
     archive7z.set(windows7zFile)
     outputFile.set(windowsExeFile)
+}
+
+tasks.register('createWindowsExeZip', Zip) {
+    group = 'packaging'
+    description = 'Creates a zip containing the final Windows self-extracting executable.'
+    dependsOn(tasks.named('buildWindowsSfxExe'))
+    archiveBaseName.set('impact-windows')
+    archiveClassifier.set(buildDateStamp)
+    archiveExtension.set('zip')
+    destinationDirectory.set(distDir)
+    from(windowsExeFile)
 }
 
 tasks.register('signMacosApp', Exec) {
@@ -375,8 +387,8 @@ tasks.register('packageMacos') {
 
 tasks.register('packageWindows') {
     group = 'packaging'
-    description = 'Builds the final Windows SFX executable.'
-    dependsOn(tasks.named('buildWindowsSfxExe'))
+    description = 'Builds the final Windows SFX executable and zips it.'
+    dependsOn(tasks.named('createWindowsExeZip'))
 }
 
 tasks.register('packageAll') {

@@ -15,8 +15,17 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+import org.w3c.dom.NodeList
 
 import javax.inject.Inject
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.OutputKeys
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
 
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -218,6 +227,20 @@ abstract class BuildSfxExe extends DefaultTask {
     }
 }
 
+abstract class PatchInfoPlistTask extends DefaultTask {
+    @InputFile
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract RegularFileProperty getPlistFile()
+
+    @Input
+    abstract MapProperty<String, String> getStringAssignments()
+
+    @TaskAction
+    void patchPlist() {
+        InfoPlistPatcher.patchInfoPlist(plistFile.get().asFile, stringAssignments.get())
+    }
+}
+
 final class IniPatcher {
     static void patchIniFile(
         File iniFile,
@@ -357,6 +380,114 @@ final class IniPatcher {
 
     private static boolean isOptionLine(String line) {
         return line?.trim()?.startsWith('-')
+    }
+}
+
+final class InfoPlistPatcher {
+    static void patchInfoPlist(File plistFile, Map<String, String> stringAssignments) {
+        if (!plistFile.exists()) {
+            throw new GradleException("Cannot patch missing Info.plist: ${plistFile}")
+        }
+
+        def normalizedAssignments = stringAssignments.collectEntries { key, value ->
+            def normalizedKey = key?.trim()
+            def normalizedValue = value?.trim()
+            if (!normalizedKey || normalizedValue == null || normalizedValue.isEmpty()) {
+                return [:]
+            }
+
+            [(normalizedKey): normalizedValue]
+        }
+
+        if (normalizedAssignments.isEmpty()) {
+            return
+        }
+
+        Document document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(plistFile)
+        document.documentElement.normalize()
+
+        Element plist = document.documentElement
+        Element dict = firstChildElementByName(plist, 'dict')
+        if (dict == null) {
+            throw new GradleException("Invalid Info.plist: missing root dict in ${plistFile}")
+        }
+
+        normalizedAssignments.each { key, value ->
+            upsertStringValue(document, dict, key, value)
+        }
+
+        def transformer = TransformerFactory.newInstance().newTransformer()
+        transformer.setOutputProperty(OutputKeys.INDENT, 'yes')
+        transformer.setOutputProperty(OutputKeys.ENCODING, 'UTF-8')
+        transformer.setOutputProperty('{http://xml.apache.org/xslt}indent-amount', '4')
+        transformer.transform(new DOMSource(document), new StreamResult(plistFile))
+    }
+
+    private static void upsertStringValue(Document document, Element dict, String key, String value) {
+        Element keyElement = findKeyElement(dict, key)
+        if (keyElement == null) {
+            dict.appendChild(document.createTextNode('\n    '))
+            keyElement = document.createElement('key')
+            keyElement.setTextContent(key)
+            dict.appendChild(keyElement)
+
+            dict.appendChild(document.createTextNode('\n    '))
+            def valueElement = document.createElement('string')
+            valueElement.setTextContent(value)
+            dict.appendChild(valueElement)
+            dict.appendChild(document.createTextNode('\n'))
+            return
+        }
+
+        Node valueNode = nextElementSibling(keyElement)
+        if (valueNode instanceof Element && valueNode.tagName == 'string') {
+            valueNode.setTextContent(value)
+            return
+        }
+
+        def replacement = document.createElement('string')
+        replacement.setTextContent(value)
+
+        if (valueNode != null) {
+            dict.replaceChild(replacement, valueNode)
+        } else {
+            dict.appendChild(document.createTextNode('\n    '))
+            dict.appendChild(replacement)
+            dict.appendChild(document.createTextNode('\n'))
+        }
+    }
+
+    private static Element findKeyElement(Element dict, String keyName) {
+        NodeList childNodes = dict.childNodes
+        for (int i = 0; i < childNodes.length; i++) {
+            Node child = childNodes.item(i)
+            if (child instanceof Element && child.tagName == 'key' && child.textContent == keyName) {
+                return (Element) child
+            }
+        }
+        return null
+    }
+
+    private static Element firstChildElementByName(Element parent, String tagName) {
+        NodeList childNodes = parent.childNodes
+        for (int i = 0; i < childNodes.length; i++) {
+            Node child = childNodes.item(i)
+            if (child instanceof Element && child.tagName == tagName) {
+                return (Element) child
+            }
+        }
+        return null
+    }
+
+    private static Node nextElementSibling(Node node) {
+        Node current = node?.nextSibling
+        while (current != null) {
+            if (current instanceof Element) {
+                return current
+            }
+            current = current.nextSibling
+        }
+        return null
     }
 }
 

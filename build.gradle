@@ -115,6 +115,7 @@ def osConfigs = [
         iniAssignments: iniAssignmentsFromProperty('macosIniAssignments', ['--DataLocation': '@user.home/Archi']),
         vmArgAssignments: iniAssignmentsFromProperty('macosVmArgAssignments', ['-Ddata.location': '@user.home/Archi']),
         vmArgsLines   : iniLinesFromProperty('macosVmArgsLines', ['-Dimpact.platform=macos']),
+        infoPlistAssignments: iniAssignmentsFromProperty('macosInfoPlistAssignments', [:]),
         launcher      : 'Archi.app'
     ],
     windows: [
@@ -283,6 +284,7 @@ def windowsSfxConfigFile = distDir.map { it.file('impact-windows.sfx.txt') }
 def windowsExeFile = distDir.map { it.file("impact-windows-${buildDateStamp.get()}.exe") }
 def windowsExeZipFile = distDir.map { it.file("impact-windows-${buildDateStamp.get()}.zip") }
 def macosAppDir = osConfigs.macos.impactDir.map { it.dir('Archi.app') }
+def macosInfoPlistFile = osConfigs.macos.impactDir.map { it.file('Archi.app/Contents/Info.plist') }
 def macosTarGzFile = distDir.map { it.file("impact-macos-${project.version}-${buildDateStamp.get()}.tar.gz") }
 
 tasks.register('createWindows7z', Exec) {
@@ -343,7 +345,7 @@ tasks.register('createWindowsExeZip', Zip) {
 tasks.register('signMacosApp', Exec) {
     group = 'packaging'
     description = 'Re-signs Archi.app in build/impact-macos after overlays and Archi.ini patching.'
-    dependsOn(tasks.named('patchArchiIniMacos'))
+    dependsOn(tasks.named('patchInfoPlistMacos'))
     inputs.dir(macosAppDir)
     outputs.dir(macosAppDir.map { it.dir('Contents/_CodeSignature') })
     doFirst {
@@ -355,6 +357,14 @@ tasks.register('signMacosApp', Exec) {
         executable = macosCodesignBin.get()
         args '--force', '--deep', '--sign', macosCodesignIdentity.get(), '--timestamp=none', appBundle.absolutePath
     }
+}
+
+tasks.register('patchInfoPlistMacos', PatchInfoPlistTask) {
+    group = 'packaging'
+    description = 'Adds or replaces string properties in Info.plist before macOS code signing.'
+    dependsOn(tasks.named('patchArchiIniMacos'))
+    plistFile.set(macosInfoPlistFile)
+    stringAssignments.set(osConfigs.macos.infoPlistAssignments)
 }
 
 tasks.register('createMacosTarGz', Tar) {
